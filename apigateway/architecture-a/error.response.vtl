@@ -1,0 +1,6 @@
+#set($message = $input.path('$.errorMessage'))
+#if($message.startsWith('{'))
+$message
+#else
+{"error":"INVALID_REQUEST","message":"Request body is not valid JSON"}
+#end

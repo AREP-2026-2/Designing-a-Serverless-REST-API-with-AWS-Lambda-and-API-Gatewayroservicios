@@ -291,6 +291,19 @@ API REST `orders-api-mapping` (Regional) en API Gateway, con integración Lambda
 
 Las plantillas de mapeo usadas están en [apigateway/architecture-a/](apigateway/architecture-a/).
 
+**Recursos y métodos de la API `orders-api-mapping`:**
+
+```
+/
+└── /orders
+    ├── GET     → orders-find    (?customerId=...)
+    ├── POST    → orders-create
+    └── /{id}
+        └── GET → orders-get
+```
+
+![Árbol de recursos de orders-api-mapping](docs/evidence/part4/22-resources-tree.png)
+
 ### `GET /orders/{id}` → `orders-get`
 
 **Solicitud de integración**, plantilla `application/json` ([get-order.request.vtl](apigateway/architecture-a/get-order.request.vtl)):
@@ -396,6 +409,8 @@ Content-Type: application/json
 
 En la consola, una *Respuesta de integración* solo se puede crear para códigos ya declarados en la *Respuesta de método* ("No hay códigos de estado de respuesta de método disponibles"). Primero se declara qué puede responder el API y después se define cuándo.
 
+Resultados en la pestaña *Prueba* de la consola de API Gateway:
+
 | Petición | Estado | Cuerpo |
 |---|---|---|
 | `GET /orders?customerId=CUST-42` | 200 | `[{"id":"ORD-001",...,"product":"MacBook Air",...},{"id":"ORD-002",...,"product":"Magic Mouse",...}]` |
@@ -420,4 +435,174 @@ En la consola, una *Respuesta de integración* solo se puede crear para códigos
 
 ![Sin customerId → 400 INVALID_REQUEST](docs/evidence/part4/10-find-missing-customer-400.png)
 
+*Sin customerId → 400 (prueba repetida)*
+
+![Sin customerId → 400](docs/evidence/part4/19-find-no-customer-400.png)
+
 **Cambios sin implementar:** antes de volver a implementar la etapa, `GET /orders?customerId=CUST-42` en la URL pública respondía `403 {"message":"Missing Authentication Token"}`. API Gateway da esa respuesta para cualquier ruta o método que no existe en la etapa desplegada. Los cambios de configuración solo se publican al implementar el API en una etapa.
+
+### `POST /orders` → `orders-create`
+
+- *Solicitud de integración*, plantilla `application/json` ([create-order.request.vtl](apigateway/architecture-a/create-order.request.vtl)): `$input.json('$')`, que pasa el cuerpo de la petición sin cambios, porque ya tiene la forma de `CreateOrderRequest`.
+- *Respuesta de método*: `201` y `400`.
+- *Respuesta de integración*:
+
+| Regex sobre `errorMessage` | Estado | Plantilla |
+|---|---|---|
+| *(vacía, respuesta predeterminada)* | **201** | ninguna: se devuelve la orden creada |
+| `(.*"error":"INVALID_REQUEST".*)\|(An error occurred during JSON parsing.*)` | **400** | [error.response.vtl](apigateway/architecture-a/error.response.vtl) |
+
+La segunda alternativa de la regex cubre el error que genera el **runtime de Lambda** (no nuestro código) cuando el JSON no se puede convertir a `CreateOrderRequest`. En ese caso `errorMessage` no es nuestro JSON de error, y la rama `#else` de la plantilla construye uno con el formato del API.
+
+**Hallazgos de configuración:**
+- El código de estado de una respuesta de integración existente **no se puede editar**: las respuestas de integración se identifican por su código. Para que el éxito respondiera 201 hubo que eliminar la respuesta predeterminada 200 y crear otra con regex vacía y código 201.
+- Solo puede existir una respuesta con regex vacía ("Integration response with selection pattern default already exists").
+
+**Evidencia: configuración de la respuesta 201**
+
+*La respuesta predeterminada existente no permite cambiar su código (200)*
+
+![La respuesta predeterminada existente no permite cambiar su código (200)](docs/evidence/part4/11-post-edit-default-200-readonly.png)
+
+*Solo puede haber una respuesta con regex vacía*
+
+![Solo puede haber una respuesta con regex vacía](docs/evidence/part4/12-post-default-already-exists.png)
+
+*Respuesta predeterminada recreada con código 201*
+
+![Respuesta predeterminada recreada con código 201](docs/evidence/part4/13-post-default-201.png)
+
+| Cuerpo enviado | Estado | Respuesta |
+|---|---|---|
+| `{"customerId":"CUST-42","product":"MacBook Air","quantity":1}` | **201** | `{"id":"ORD-004","customerId":"CUST-42","product":"MacBook Air","quantity":1}` |
+| `{"customerId":"CUST-42","product":"Mouse","quantity":0}` | **400** | `{"error":"INVALID_REQUEST","message":"quantity must be greater than 0"}` |
+| `{"customerId":"CUST-42","product":"Mouse","quantity":"abc"}` | **400** | `{"error":"INVALID_REQUEST","message":"Request body is not valid JSON"}` |
+| `{"customerId":"CUST-42","quantity":2}` | **400** | `{"error":"INVALID_REQUEST","message":"product is required"}` |
+
+**Evidencia: pruebas de `POST /orders`**
+
+*Creación válida → 201*
+
+![Creación válida → 201](docs/evidence/part4/14-post-201.png)
+
+*quantity = 0 → 400*
+
+![quantity = 0 → 400](docs/evidence/part4/15-post-quantity-0-400.png)
+
+*quantity = "abc" → 400 (error del runtime traducido por la plantilla)*
+
+![quantity = "abc" → 400](docs/evidence/part4/16-post-wrong-type-400.png)
+
+*Sin product → 400*
+
+![Sin product → 400](docs/evidence/part4/17-post-missing-product-400.png)
+
+**La memoria se perdió.** La creación válida devolvió de nuevo `ORD-004`, aunque en la Parte II la misma función `orders-create` había llegado a `ORD-006`. Entre ambas pruebas Lambda recicló el entorno de ejecución (la latencia de 674 ms corresponde a un arranque en frío) y el repositorio en memoria volvió a los datos de ejemplo. Los datos en memoria de una Lambda no son persistentes; un sistema real necesita un almacén externo (por ejemplo DynamoDB).
+
+**Limitación: header `Location`.** En la integración no-proxy, un header de respuesta solo puede tomar un valor estático o un valor copiado del cuerpo (`integration.response.body.id` → `ORD-004`). No se puede construir la URL `/orders/ORD-004` sin modificar la respuesta de Lambda, así que la Arquitectura A responde 201 **sin** `Location`.
+
+Salida completa de las pruebas HTTP de la Arquitectura A: [docs/examples/architecture-a.txt](docs/examples/architecture-a.txt).
+
+---
+
+## 5. Parte V — Integración Lambda proxy y adaptador HTTP (Arquitectura B)
+
+### Diseño
+
+Una sola función Lambda, `orders-api`, atiende todo el API. API Gateway ya no transforma nada: reenvía la petición HTTP completa como un evento y devuelve tal cual la respuesta que construye Lambda.
+
+```
+src/main/java/edu/eci/orders/
+├── domain/, application/, infrastructure/   ← sin cambios (Java puro)
+└── lambda/
+    ├── custom/   ← Arquitectura A: un handler por operación, entrada ya transformada
+    └── proxy/    ← Arquitectura B
+        ├── OrdersApiHandler.java   ← adaptador HTTP: única clase que conoce HTTP
+        └── ErrorBody.java          ← cuerpo JSON de error
+```
+
+`OrdersApiHandler` implementa `RequestHandler<APIGatewayProxyRequestEvent, APIGatewayProxyResponseEvent>` (de `aws-lambda-java-events`) y es responsable de:
+
+| Responsabilidad | Cómo |
+|---|---|
+| Enrutamiento | `httpMethod` + `resource` del evento (`/orders`, `/orders/{id}`) |
+| Parámetros | `pathParameters.id`, `queryStringParameters.customerId` |
+| Cuerpo | `body` (string) → `CreateOrderRequest` con Jackson; JSON inválido → 400 |
+| Códigos HTTP | `ValidationException` → 400, `OrderNotFoundException` → 404, método no soportado → 405, cualquier otra excepción → 500 |
+| Headers | `Content-Type: application/json`; `Location` en el 201, construido con `requestContext.path` para incluir la etapa (`/dev/orders/ORD-004`) |
+| Errores internos | Se registran en CloudWatch; el cliente recibe solo `{"error":"INTERNAL_ERROR","message":"Unexpected error"}` |
+
+`OrderService` no cambió: la lógica de negocio sigue sin saber nada de HTTP ni de AWS.
+
+**Pruebas locales:** [OrdersApiHandlerTest](src/test/java/edu/eci/orders/lambda/proxy/OrdersApiHandlerTest.java) construye eventos de API Gateway en memoria y verifica estado, headers y cuerpo de 12 casos, incluido el **500**: se simula un repositorio que lanza una excepción inesperada. En la Arquitectura A esas mismas reglas (qué error es 404, qué es 400) viven en la consola de API Gateway y solo se pueden probar desplegando.
+
+### Configuración
+
+- **Lambda** `orders-api`: Java 17, x86_64, `LabRole`, 512 MB, 15 s, handler `edu.eci.orders.lambda.proxy.OrdersApiHandler::handleRequest`.
+- **API REST** `orders-api-proxy` (Regional), etapa `dev`, URL `https://ye9icxasx9.execute-api.us-east-1.amazonaws.com/dev`:
+
+```
+/
+└── /orders          ANY → orders-api (proxy)
+    └── /{id}        ANY → orders-api (proxy)
+```
+
+Son solo 2 métodos, sin plantillas de mapeo, sin expresiones regulares y sin respuestas de método ni de integración. Se usa `ANY` para que todos los métodos HTTP lleguen al adaptador y sea Java quien responda 405 a los no soportados.
+
+![Lambda orders-api](docs/evidence/part5/01-orders-api-created.png)
+
+![Etapa dev de orders-api-proxy](docs/evidence/part5/02-proxy-stage-dev.png)
+
+### Resultados (URL pública)
+
+| Petición | Estado | Cuerpo / headers |
+|---|---|---|
+| `GET /orders/ORD-001` | 200 | `{"id":"ORD-001","customerId":"CUST-42","product":"MacBook Air","quantity":1}` |
+| `GET /orders/ORD-999` | 404 | `{"error":"ORDER_NOT_FOUND","message":"Order ORD-999 does not exist"}` |
+| `GET /orders?customerId=CUST-42` | 200 | `[{"id":"ORD-001",...},{"id":"ORD-002",...}]` |
+| `GET /orders?customerId=CUST-100` | 200 | `[]` |
+| `GET /orders` | 400 | `{"error":"INVALID_REQUEST","message":"customerId is required"}` |
+| `POST /orders` válido | **201** | `Location: /dev/orders/ORD-004` + la orden creada |
+| `POST /orders` con `quantity: 0` | 400 | `{"error":"INVALID_REQUEST","message":"quantity must be greater than 0"}` |
+| `POST /orders` con `quantity: "abc"` | 400 | `{"error":"INVALID_REQUEST","message":"Request body is not valid JSON"}` |
+| `POST /orders` con JSON truncado | 400 | `{"error":"INVALID_REQUEST","message":"Request body is not valid JSON"}` |
+| `POST /orders` sin cuerpo | 400 | `{"error":"INVALID_REQUEST","message":"Request body is required"}` |
+| `PATCH /orders/ORD-001` | 405 | `{"error":"METHOD_NOT_ALLOWED","message":"Method PATCH is not allowed on /orders/{id}"}` |
+
+Salida completa: [docs/examples/architecture-b.txt](docs/examples/architecture-b.txt).
+
+**Estado compartido entre operaciones.** Como todas las operaciones corren en la misma Lambda, una orden creada con `POST` es visible inmediatamente con `GET`. Seguir el header `Location` devuelto (`/dev/orders/ORD-006`) responde 200, y `GET /orders?customerId=CUST-77` lista las dos órdenes recién creadas. En la Arquitectura A (una Lambda por operación) esto no ocurría. Aun así, sigue siendo memoria de un único entorno de ejecución: con varias instancias concurrentes o después de un reciclaje, los datos no se comparten ni se conservan.
+
+---
+
+## 6. Reto final — `DELETE /orders/{id}`: predicción
+
+> Escrita y versionada **antes** de implementar la operación. La implementación se compara con esta predicción en la sección siguiente.
+
+Comportamiento esperado: `DELETE /orders/ORD-001` → `204 No Content` (sin cuerpo); `DELETE /orders/ORD-999` → `404 Not Found` con `{"error":"ORDER_NOT_FOUND",...}`.
+
+La predicción se hace sobre la **Arquitectura B** (proxy), que es la que se extiende.
+
+**1. ¿Qué clases Java deberían cambiar?**
+- `OrderRepository`: nueva operación `deleteById(String id)` que indique si existía.
+- `InMemoryOrderRepository`: su implementación (quitar la orden del mapa).
+- `OrderService`: nuevo método `deleteOrder(String id)` que valida el id y lanza `OrderNotFoundException` si la orden no existe.
+- `OrdersApiHandler`: nueva ruta `DELETE` en `/orders/{id}`.
+
+`Order`, `CreateOrderRequest` y las excepciones de dominio no deberían cambiar. Los handlers de la Arquitectura A tampoco, porque no se extiende.
+
+**2. ¿Se necesita una nueva Lambda?**
+No. `orders-api` ya atiende todo el API; basta con subir el JAR nuevo. En la Arquitectura A sí haría falta, siguiendo su patrón de una Lambda (o al menos un handler) por operación.
+
+**3. ¿Debe cambiar la configuración de API Gateway?**
+No. `/orders/{id}` tiene el método `ANY` con integración proxy, así que un `DELETE` ya llega a Lambda. La evidencia es que hoy `DELETE /orders/ORD-001` responde **405 desde Java** (`METHOD_NOT_ALLOWED`), no 403 desde API Gateway. En la Arquitectura A habría que crear el método DELETE, su plantilla, las respuestas de método 204/404, la regex del 404 y volver a implementar la etapa.
+
+**4. ¿Dónde debe vivir la lógica de borrado?**
+En la aplicación: `OrderService.deleteOrder` decide las reglas (id obligatorio, la orden debe existir) y `OrderRepository` hace el borrado físico. El handler no debe tocar el repositorio directamente.
+
+**5. ¿Dónde debe decidirse si se responde 204 o 404?**
+En el adaptador HTTP (`OrdersApiHandler`). `OrderService` solo expresa el resultado en términos del dominio (termina normalmente o lanza `OrderNotFoundException`); el adaptador traduce: éxito → 204 sin cuerpo, `OrderNotFoundException` → 404. Esa traducción ya existe en el `catch` del handler, así que el 404 no debería requerir código nuevo.
+
+**6. ¿Qué pruebas deben agregarse?**
+- `OrderServiceTest`: borrar una orden existente y comprobar que después `getOrder` lanza `OrderNotFoundException`; borrar una inexistente lanza `OrderNotFoundException`; borrar con id vacío lanza `ValidationException`; borrar una orden no afecta las demás órdenes del cliente.
+- `OrdersApiHandlerTest`: `DELETE` existente → 204 con cuerpo vacío; `DELETE` inexistente → 404 con el cuerpo de error; `GET` de la orden después de borrarla → 404; un segundo `DELETE` de la misma orden → 404.

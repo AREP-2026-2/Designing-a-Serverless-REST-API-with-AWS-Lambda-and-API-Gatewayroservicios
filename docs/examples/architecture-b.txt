@@ -1,0 +1,87 @@
+# Architecture B (Lambda proxy) - API=https://ye9icxasx9.execute-api.us-east-1.amazonaws.com/dev
+
+$ curl -i $API/orders/ORD-001
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"id":"ORD-001","customerId":"CUST-42","product":"MacBook Air","quantity":1}
+
+
+$ curl -i $API/orders/ORD-999
+HTTP/1.1 404 Not Found
+Content-Type: application/json
+
+{"error":"ORDER_NOT_FOUND","message":"Order ORD-999 does not exist"}
+
+
+$ curl -i $API/orders?customerId=CUST-42
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+[{"id":"ORD-001","customerId":"CUST-42","product":"MacBook Air","quantity":1},{"id":"ORD-002","customerId":"CUST-42","product":"Magic Mouse","quantity":2}]
+
+
+$ curl -i $API/orders?customerId=CUST-100
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+[]
+
+
+$ curl -i $API/orders
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{"error":"INVALID_REQUEST","message":"customerId is required"}
+
+
+$ curl -i -X POST $API/orders -H Content-Type: application/json -d {"customerId":"CUST-42","product":"MacBook Air","quantity":1}
+HTTP/1.1 201 Created
+Content-Type: application/json
+Location: /dev/orders/ORD-004
+
+{"id":"ORD-004","customerId":"CUST-42","product":"MacBook Air","quantity":1}
+
+
+$ curl -i -X POST $API/orders -H Content-Type: application/json -d {"customerId":"CUST-42","product":"Mouse","quantity":0}
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{"error":"INVALID_REQUEST","message":"quantity must be greater than 0"}
+
+
+$ curl -i -X POST $API/orders -H Content-Type: application/json -d {"customerId":"CUST-42","product":"Mouse","quantity":"abc"}
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{"error":"INVALID_REQUEST","message":"Request body is not valid JSON"}
+
+
+$ curl -i -X POST $API/orders -H Content-Type: application/json -d {"customerId":"CUST-42","product":
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{"error":"INVALID_REQUEST","message":"Request body is not valid JSON"}
+
+
+$ curl -i -X POST $API/orders
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{"error":"INVALID_REQUEST","message":"Request body is required"}
+
+
+$ curl -i -X PATCH $API/orders/ORD-001
+HTTP/1.1 405 Method Not Allowed
+Content-Type: application/json
+
+{"error":"METHOD_NOT_ALLOWED","message":"Method PATCH is not allowed on /orders/{id}"}
+
+
+$ curl -i -X DELETE $API/orders/ORD-001
+HTTP/1.1 405 Method Not Allowed
+Content-Type: application/json
+
+{"error":"METHOD_NOT_ALLOWED","message":"Method DELETE is not allowed on /orders/{id}"}
+
+

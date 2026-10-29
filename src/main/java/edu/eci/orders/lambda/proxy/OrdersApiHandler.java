@@ -90,6 +90,10 @@ public class OrdersApiHandler
             if ("GET".equals(method)) {
                 return json(200, service.getOrder(param(event.getPathParameters(), "id")));
             }
+            if ("DELETE".equals(method)) {
+                service.deleteOrder(param(event.getPathParameters(), "id"));
+                return new APIGatewayProxyResponseEvent().withStatusCode(204);
+            }
         } else {
             return error(404, "NOT_FOUND", "Resource " + event.getPath() + " does not exist");
         }

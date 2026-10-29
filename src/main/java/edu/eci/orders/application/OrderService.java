@@ -51,6 +51,13 @@ public class OrderService {
         return repository.findByCustomerId(customerId.trim());
     }
 
+    public void deleteOrder(String id) {
+        requireText(id, "id");
+        if (!repository.deleteById(id.trim())) {
+            throw new OrderNotFoundException(id.trim());
+        }
+    }
+
     private static void requireText(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new ValidationException(field + " is required");

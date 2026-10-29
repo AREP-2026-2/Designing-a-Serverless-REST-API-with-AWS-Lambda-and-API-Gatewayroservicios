@@ -2,6 +2,9 @@
 
 API REST pequeña para gestionar órdenes, construida con Java 17, Maven, AWS Lambda y Amazon API Gateway.
 
+## MADE BY:
+- Sebastian Albarracin Silva
+
 ## Cómo compilar y probar
 
 Requisitos: Java 17 y Maven 3.9+.
@@ -606,3 +609,242 @@ En el adaptador HTTP (`OrdersApiHandler`). `OrderService` solo expresa el result
 **6. ¿Qué pruebas deben agregarse?**
 - `OrderServiceTest`: borrar una orden existente y comprobar que después `getOrder` lanza `OrderNotFoundException`; borrar una inexistente lanza `OrderNotFoundException`; borrar con id vacío lanza `ValidationException`; borrar una orden no afecta las demás órdenes del cliente.
 - `OrdersApiHandlerTest`: `DELETE` existente → 204 con cuerpo vacío; `DELETE` inexistente → 404 con el cuerpo de error; `GET` de la orden después de borrarla → 404; un segundo `DELETE` de la misma orden → 404.
+
+---
+
+## 7. Reto final — implementación de `DELETE /orders/{id}` y comparación con la predicción
+
+### Cambios realizados
+
+| Archivo | Cambio |
+|---|---|
+| [OrderRepository.java](src/main/java/edu/eci/orders/application/OrderRepository.java) | `boolean deleteById(String id)` |
+| [InMemoryOrderRepository.java](src/main/java/edu/eci/orders/infrastructure/InMemoryOrderRepository.java) | `orders.remove(id) != null` |
+| [OrderService.java](src/main/java/edu/eci/orders/application/OrderService.java) | `deleteOrder(String id)`: valida el id y lanza `OrderNotFoundException` si no existía |
+| [OrdersApiHandler.java](src/main/java/edu/eci/orders/lambda/proxy/OrdersApiHandler.java) | ruta `DELETE` en `/orders/{id}` → `204` sin cuerpo |
+| [OrderServiceTest.java](src/test/java/edu/eci/orders/application/OrderServiceTest.java) | 4 pruebas nuevas (5 casos) |
+| [OrdersApiHandlerTest.java](src/test/java/edu/eci/orders/lambda/proxy/OrdersApiHandlerTest.java) | 4 pruebas nuevas |
+
+Total: **49 pruebas**, todas pasan con `mvn test`.
+
+```java
+// OrderService: regla de negocio, sin HTTP
+public void deleteOrder(String id) {
+    requireText(id, "id");
+    if (!repository.deleteById(id.trim())) {
+        throw new OrderNotFoundException(id.trim());
+    }
+}
+
+// OrdersApiHandler: traducción a HTTP
+if ("DELETE".equals(method)) {
+    service.deleteOrder(param(event.getPathParameters(), "id"));
+    return new APIGatewayProxyResponseEvent().withStatusCode(204);
+}
+```
+
+### Predicción vs. implementación
+
+| Pregunta | Predicción | Resultado |
+|---|---|---|
+| Clases que cambian | Repositorio (interfaz e implementación), servicio y adaptador | ✅ Exactamente esas cuatro. `Order`, `CreateOrderRequest`, las excepciones y los handlers de la Arquitectura A no cambiaron. |
+| ¿Nueva Lambda? | No | ✅ Se subió el JAR nuevo a `orders-api`. |
+| ¿Cambia API Gateway? | No, `ANY` ya enruta el DELETE | ✅ No se tocó `orders-api-proxy` ni se volvió a implementar la etapa. |
+| Lógica de borrado | `OrderService` + repositorio | ✅ |
+| Decisión 204/404 | Adaptador HTTP | ✅ El 204 está en la rama `DELETE`. El 404 no necesitó código nuevo: lo produce el `catch (OrderNotFoundException)` que ya existía para el GET. |
+| Pruebas | 4 del servicio y 4 del adaptador | ✅ |
+
+Lo que la predicción no anticipó: el `204` se devuelve **sin** `Content-Type`, porque no hay cuerpo. Además, en la Arquitectura A, `DELETE /orders/ORD-001` sigue respondiendo `403 Missing Authentication Token`: la operación no existe en ese API, y agregarla habría requerido una Lambda, un método, plantillas, respuestas de método y de integración, y una nueva implementación de la etapa.
+
+---
+
+## 8. Checkpoint 3 — Responsabilidades de API Gateway en la Arquitectura A
+
+En la Arquitectura A, API Gateway es responsable de:
+
+| Responsabilidad | Dónde se configuró |
+|---|---|
+| Enrutamiento: recurso + método → función Lambda | Recursos y métodos (`/orders` GET/POST, `/orders/{id}` GET → 3 Lambdas) |
+| Extraer el parámetro de ruta `{id}` | Plantilla de solicitud de `GET /orders/{id}` |
+| Extraer el parámetro de consulta `customerId` | Plantilla de solicitud de `GET /orders` |
+| Transformar la petición en el JSON que espera cada handler | Plantillas de mapeo de solicitud (VTL) |
+| Elegir el código de éxito (200 o 201) | Respuesta de integración predeterminada de cada método |
+| Mapear errores a códigos HTTP (400, 404) | Expresiones regulares sobre `errorMessage`, por método |
+| Transformar la respuesta de error (quitar `errorType` y `stackTrace`) | Plantillas de mapeo de respuesta, por código y por método |
+| Declarar qué códigos puede responder cada método | Respuestas de método |
+| Responder a rutas inexistentes | Respuesta propia de API Gateway: `403 Missing Authentication Token` |
+
+Lambda conserva la validación y la decisión de *qué* error ocurrió (`INVALID_REQUEST`, `ORDER_NOT_FOUND`), pero no el código HTTP.
+
+**Ventajas**
+
+- Los handlers Java son mínimos y tipados (`GetOrderInput` → `Order`): no saben nada de HTTP, headers ni códigos de estado.
+- El contrato HTTP (rutas, parámetros, códigos posibles) queda declarado y visible en API Gateway.
+- Algunas cosas se pueden ajustar sin recompilar ni volver a desplegar Java (por ejemplo, el texto de una respuesta).
+- API Gateway podría rechazar peticiones inválidas antes de invocar Lambda (validadores y modelos), lo que ahorra invocaciones.
+
+**Desventajas** (la mayoría vividas durante el taller)
+
+- **La lógica HTTP queda partida en dos lugares**: Java decide el error y API Gateway decide el código. Para cambiar un código hay que tocar las dos partes y mantenerlas sincronizadas mediante un *string* (`"error":"ORDER_NOT_FOUND"` dentro de `errorMessage`).
+- **El comportamiento por defecto es inseguro**: un error no mapeado sale como `200` con `errorType` y `stackTrace`. Ocurrió dos veces: `ORD-999` antes de configurar la regex, y `id is required` cuando una plantilla quedó mal.
+- **Configuración repetitiva por método**: cada método necesita su plantilla, sus respuestas de método, sus regex y sus plantillas de respuesta.
+- **Configuración manual y fácil de equivocar**: las plantillas de los dos GET terminaron en el método equivocado y hubo que diagnosticarlo con `curl`. Nada de eso lo detecta un compilador ni una prueba.
+- **No se puede probar localmente**: las reglas de mapeo solo se prueban en la consola o desplegando.
+- **Los cambios no se ven hasta implementar la etapa** (el 403 de `GET /orders` antes de implementar).
+- **Limitaciones expresivas**: no se pudo construir el header `Location`, y el código de una respuesta de integración existente no se puede editar.
+- La configuración hecha con clics no queda versionada en Git: solo las plantillas copiadas en [apigateway/architecture-a/](apigateway/architecture-a/) y esta documentación.
+
+---
+
+## 9. Comparación de arquitecturas
+
+**¿Qué enfoque requirió más configuración de API Gateway?**
+La **A**, con diferencia: 3 métodos, 3 plantillas de solicitud, 5 respuestas de método adicionales (201, 400, 400, 404 y el reemplazo del 200), 3 respuestas de integración con regex y sus plantillas de respuesta. La **B** tiene 2 métodos `ANY` con el proxy activado y nada más.
+
+**¿Qué enfoque requirió más código Java de infraestructura?**
+La **B**: `OrdersApiHandler` (enrutamiento, extracción de parámetros, parseo del cuerpo, códigos, headers y serialización) más las dependencias `aws-lambda-java-events` y Jackson. En la A, los handlers son de pocas líneas, más `OrderApiException` y `Errors`.
+
+**¿Cuál fue más fácil de probar localmente?**
+La **B**. Las 16 pruebas de `OrdersApiHandlerTest` verifican estado, headers y cuerpo HTTP sin AWS, incluido el 500. En la A, las pruebas locales solo llegan hasta el `errorMessage` que produce el handler; el código HTTP real depende de regex y plantillas que solo se prueban en AWS.
+
+**¿Dónde se definen los códigos de estado en cada enfoque?**
+- A: en API Gateway (respuesta predeterminada, regex de error de Lambda y respuestas de método), separados del código Java.
+- B: en Java, en `OrdersApiHandler` (`json(200, ...)`, `json(201, ...)`, `withStatusCode(204)` y los `catch` que producen 400/404/500).
+
+**¿Qué pasa si el API crece de 3 a 30 operaciones?**
+- A: crece linealmente la configuración manual (plantillas, regex y respuestas por método) y, con su patrón, el número de Lambdas. Cada operación nueva repite el mismo trabajo propenso a errores y requiere volver a implementar la etapa.
+- B: API Gateway prácticamente no cambia (o se usa `{proxy+}`), y el crecimiento ocurre en Java, donde hay compilador, pruebas y control de versiones. El riesgo es que `OrdersApiHandler` se convierta en un enrutador gigante. Habría que separar el enrutamiento en una tabla de rutas o en un handler por recurso, y considerar si conviene dividir en varias Lambdas por dominio.
+
+**¿Qué enfoque deja más limpia la lógica de negocio?**
+En **ambos** `OrderService` es idéntico y no conoce HTTP ni AWS: es la parte que no cambió en todo el taller. La diferencia está en la capa intermedia. La A filtra un poco de "HTTP" hacia Java de forma indirecta (códigos de error en el texto de una excepción, pensados para una regex). La B concentra todo lo HTTP en una sola clase explícita.
+
+**¿Cuál sería más fácil de entender para otro desarrollador?**
+La **B**: todo el comportamiento HTTP se lee en un archivo Java, con pruebas que lo documentan. En la A hay que reconstruir el comportamiento abriendo cada método en la consola y leyendo plantillas VTL y regex. Sin documentación como esta, no es evidente por qué un error termina en 404.
+
+**¿Cuál elegiría para un sistema más grande?**
+La **B**, con matices. El comportamiento queda en código versionado y probado, se despliega como una unidad, y API Gateway se dedica a lo que hace bien: exponer el endpoint, TLS, throttling, autorización y CORS. Mantendría en API Gateway las responsabilidades transversales (autenticación, límites de tasa, quizá validación de esquemas para rechazar basura temprano) y dejaría en el adaptador la traducción HTTP ↔ aplicación. La configuración de API Gateway la definiría como infraestructura como código (SAM, CDK o Terraform) y no en la consola. La A tiene sentido en APIs pequeñas y estables, o cuando se integra un backend que no se puede modificar y API Gateway debe adaptar el contrato.
+
+---
+
+## 10. Arquitectura final
+
+```mermaid
+flowchart TB
+    C["Cliente HTTP<br/>(curl, Postman)"]
+
+    subgraph AWS["AWS (depende de AWS)"]
+        GW["Amazon API Gateway<br/>orders-api-proxy · etapa dev<br/>ANY /orders · ANY /orders/{id}<br/>integración Lambda proxy"]
+        subgraph L["AWS Lambda · orders-api (Java 17)"]
+            H["OrdersApiHandler<br/><i>adaptador HTTP</i><br/>aws-lambda-java-events + Jackson"]
+            subgraph J["Java puro (sin AWS ni HTTP)"]
+                S["OrderService<br/>create · get · findByCustomer · delete"]
+                R["«interface» OrderRepository"]
+                M["InMemoryOrderRepository"]
+                D["Order · CreateOrderRequest<br/>ValidationException · OrderNotFoundException"]
+            end
+        end
+        CW["CloudWatch Logs"]
+    end
+
+    C -- "1. petición HTTP" --> GW
+    GW -- "2. APIGatewayProxyRequestEvent" --> H
+    H -- "3. llamada a métodos Java" --> S
+    S --> R
+    M -. implementa .-> R
+    S -. usa .-> D
+    S -- "4. Order / excepción de dominio" --> H
+    H -- "5. APIGatewayProxyResponseEvent<br/>(status, headers, body)" --> GW
+    GW -- "6. respuesta HTTP" --> C
+    H -. eventos y errores .-> CW
+
+    classDef aws fill:#ffe8cc,stroke:#d9822b,color:#000
+    classDef java fill:#dff3e4,stroke:#2f9e44,color:#000
+    class GW,H,CW aws
+    class S,R,M,D java
+```
+
+- **Naranja (depende de AWS):** API Gateway, CloudWatch y `OrdersApiHandler` (usa `aws-lambda-java-core` y `aws-lambda-java-events`).
+- **Verde (Java puro):** `domain`, `application` e `infrastructure`. Se compilan y se prueban sin AWS; podrían reutilizarse detrás de otro adaptador (Spring, una CLI, otra nube) sin cambios.
+- Las dependencias apuntan hacia adentro: el adaptador conoce al servicio y el servicio no conoce al adaptador.
+
+**Arquitectura A, para comparación:**
+
+```mermaid
+flowchart LR
+    C["Cliente"] --> GW["API Gateway orders-api-mapping<br/>plantillas VTL · regex · respuestas"]
+    GW -- "{id}" --> G["Lambda orders-get<br/>GetOrderHandler"]
+    GW -- "{customerId}" --> F["Lambda orders-find<br/>FindOrdersByCustomerHandler"]
+    GW -- "CreateOrderRequest" --> P["Lambda orders-create<br/>CreateOrderHandler"]
+    G --> S1["OrderService + repositorio en memoria (copia 1)"]
+    F --> S2["OrderService + repositorio en memoria (copia 2)"]
+    P --> S3["OrderService + repositorio en memoria (copia 3)"]
+```
+
+---
+
+## 11. Error interno inesperado
+
+| Situación | Arquitectura A | Arquitectura B |
+|---|---|---|
+| Excepción no prevista dentro de `OrderService` o del repositorio | `Errors.translate` la convierte en `INTERNAL_ERROR`, pero solo hay regex para 400/404, así que API Gateway la devuelve con la **respuesta predeterminada (200/201)** e incluye `errorType` y `stackTrace`. Para obtener un 500 habría que agregar en **cada método** una respuesta de método 500 y una regex para `INTERNAL_ERROR`. | `catch (RuntimeException)` en `OrdersApiHandler` → **`500 {"error":"INTERNAL_ERROR","message":"Unexpected error"}`**. La traza completa va a CloudWatch y nunca al cliente. Cubierto por la prueba `unexpectedFailureReturns500WithoutInternalDetails`. |
+| Fallo de la Lambda fuera del handler (timeout, falta de memoria, error de inicialización) | Error de Lambda no mapeado → igual que arriba | API Gateway responde **`502 {"message":"Internal server error"}`** porque no recibe una respuesta proxy válida. Ese caso no lo controla el código Java. |
+
+---
+
+## 12. Desarrollo asistido por IA
+
+Usé un asistente de código (Claude) como colaborador: le pedí proponer la arquitectura antes de escribir código, implementar por partes y guiarme en la consola de AWS. Validé cada paso con pruebas, invocaciones manuales y `curl` contra la URL pública. Varias de sus suposiciones se corrigieron con evidencia real: el código de una respuesta de integración no se puede editar, la consola en español usa otros nombres, y las plantillas terminaron en el método equivocado.
+
+Prompt base utilizado:
+
+```
+Tengo una aplicación Java 17 que implementa una Orders API (POST /orders,
+GET /orders/{id}, GET /orders?customerId=...). Quiero exponerla con AWS Lambda
+y API Gateway, primero con integración no-proxy y plantillas de mapeo, y luego
+con integración Lambda proxy.
+
+La lógica de aplicación debe seguir sin depender de clases de AWS ni de HTTP.
+
+Antes de generar código:
+1. propone la arquitectura;
+2. indica qué archivos existentes cambian;
+3. indica qué clases nuevas se necesitan;
+4. explica dónde vivirán las responsabilidades HTTP.
+No implementes nada hasta explicar la arquitectura. Estoy en AWS Academy
+Learner Lab (solo puedo usar el rol LabRole).
+```
+
+### Crítica de decisiones del agente
+
+**Decisión 1: una Lambda por operación en la Arquitectura A.**
+- *Por qué la propuso:* es el patrón natural de la integración no-proxy. Cada método de API Gateway se integra con una función cuya entrada tipada coincide con lo que produce la plantilla (`GetOrderInput`, `FindOrdersInput`).
+- *¿Estoy de acuerdo?* Parcialmente. Simplifica cada handler, pero triplica la configuración y rompe el estado compartido: la orden creada por `orders-create` no existía para `orders-get` ni para `orders-find`.
+- *Alternativa:* una sola Lambda en la A, con plantillas que agreguen un campo `"operation": "get"` para despachar en Java.
+- *Implementación final:* mantuve una Lambda por operación en la A, porque hace visible el contraste con la B, y una sola Lambda (`orders-api`) en la arquitectura final.
+
+**Decisión 2: la validación vive en `OrderService` y no en API Gateway.**
+- *Por qué la propuso:* para tener una única fuente de verdad, probable con JUnit, y un formato de error idéntico en ambas arquitecturas. Por eso no marcó `customerId` como obligatorio en la solicitud de método.
+- *¿Estoy de acuerdo?* Sí, para las reglas de negocio (`quantity > 0`). Pero es discutible para la validación estructural: con validadores y modelos (JSON Schema) en API Gateway, una petición mal formada se rechaza sin invocar Lambda, lo que ahorra costo y latencia.
+- *Alternativa:* validación de esquema en API Gateway, con *Gateway Responses* personalizadas para mantener el formato `{"error","message"}`, y reglas de negocio en el servicio.
+- *Implementación final:* toda la validación en el servicio, por consistencia y testabilidad. La validación temprana en API Gateway queda como mejora.
+
+**Decisión 3: transportar el error de la Arquitectura A como JSON dentro del mensaje de la excepción y mapearlo con regex.**
+- *Por qué la propuso:* en la integración no-proxy, el único dato del error de Lambda que API Gateway puede evaluar es `errorMessage`.
+- *¿Estoy de acuerdo?* Funciona, pero es frágil: acopla Java a una cadena que una regex debe reconocer, y un error no reconocido sale como 200 con `stackTrace` (ocurrió con `id is required`).
+- *Alternativa:* que el handler nunca lance excepciones y devuelva un sobre `{"status": 404, "body": {...}}`, con una plantilla de respuesta que use `$context.responseOverride.status` para fijar el código. Eliminaría las regex, aunque el código HTTP volvería a decidirse en Java.
+- *Implementación final:* mantuve la regex porque es el mecanismo que el taller pedía explorar, y documenté sus riesgos (secciones 8 y 11).
+
+**Decisión 4: registrar en CloudWatch el evento proxy completo en cada invocación.**
+- *Por qué la propuso:* el taller pide investigar el evento que envía API Gateway, y los logs son la forma más directa de ver uno real.
+- *¿Estoy de acuerdo?* Para el taller sí. En producción no: el evento incluye headers (incluido `Authorization`), IP de origen y el cuerpo con datos del cliente, y eso termina en los logs.
+- *Alternativa:* activarlo solo con una variable de entorno (`LOG_EVENTS=true`) o registrar solo método, ruta y request id.
+- *Implementación final:* se dejó activo por ser un entorno de laboratorio. Es lo primero que cambiaría antes de un uso real.
+
+**Decisión 5: construir el header `Location` con `requestContext.path`.**
+- *Por qué la propuso:* `/orders/ORD-004` no funciona desde el cliente porque la URL real incluye la etapa (`/dev`).
+- *¿Estoy de acuerdo?* Sí. Lo verifiqué siguiendo el `Location` devuelto, que respondió 200.
+- *Alternativa:* URL absoluta con el header `Host` del evento, o un dominio personalizado sin etapa en la ruta.
+- *Implementación final:* `Location: /dev/orders/{id}`.
+
+## LINK VIDEO DEMO:
+- SUBIDO A YOUTUBE: https://youtu.be/U9VOn86TQ3s

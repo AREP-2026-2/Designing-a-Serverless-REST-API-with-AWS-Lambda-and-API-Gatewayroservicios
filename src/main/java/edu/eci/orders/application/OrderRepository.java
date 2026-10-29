@@ -15,4 +15,7 @@ public interface OrderRepository {
     Optional<Order> findById(String id);
 
     List<Order> findByCustomerId(String customerId);
+
+    /** @return true if the order existed and was removed */
+    boolean deleteById(String id);
 }

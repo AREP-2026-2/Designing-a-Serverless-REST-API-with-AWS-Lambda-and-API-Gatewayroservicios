@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OrdersApiHandlerTest {
@@ -120,6 +121,42 @@ class OrdersApiHandlerTest {
     }
 
     @Test
+    void deleteExistingOrderReturns204WithoutBody() {
+        APIGatewayProxyResponseEvent response = handler.handleRequest(delete("ORD-001"), null);
+
+        assertEquals(204, response.getStatusCode());
+        assertNull(response.getBody());
+    }
+
+    @Test
+    void deleteMissingOrderReturns404() {
+        APIGatewayProxyResponseEvent response = handler.handleRequest(delete("ORD-999"), null);
+
+        assertEquals(404, response.getStatusCode());
+        assertEquals("{\"error\":\"ORDER_NOT_FOUND\",\"message\":\"Order ORD-999 does not exist\"}",
+                response.getBody());
+    }
+
+    @Test
+    void getAfterDeleteReturns404() {
+        handler.handleRequest(delete("ORD-001"), null);
+
+        APIGatewayProxyResponseEvent response = handler.handleRequest(
+                request("GET", "/orders/{id}").withPathParameters(Map.of("id", "ORD-001")), null);
+
+        assertEquals(404, response.getStatusCode());
+    }
+
+    @Test
+    void secondDeleteOfSameOrderReturns404() {
+        handler.handleRequest(delete("ORD-001"), null);
+
+        APIGatewayProxyResponseEvent response = handler.handleRequest(delete("ORD-001"), null);
+
+        assertEquals(404, response.getStatusCode());
+    }
+
+    @Test
     void unsupportedMethodReturns405() {
         APIGatewayProxyResponseEvent response = handler.handleRequest(
                 request("PATCH", "/orders/{id}").withPathParameters(Map.of("id", "ORD-001")), null);
@@ -142,6 +179,10 @@ class OrdersApiHandlerTest {
 
         assertEquals(500, response.getStatusCode());
         assertEquals("{\"error\":\"INTERNAL_ERROR\",\"message\":\"Unexpected error\"}", response.getBody());
+    }
+
+    private static APIGatewayProxyRequestEvent delete(String id) {
+        return request("DELETE", "/orders/{id}").withPathParameters(Map.of("id", id));
     }
 
     private static APIGatewayProxyRequestEvent request(String method, String resource) {

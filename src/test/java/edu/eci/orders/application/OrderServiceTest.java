@@ -129,6 +129,39 @@ class OrderServiceTest {
     }
 
     @Test
+    void deletedOrderCanNoLongerBeRetrieved() {
+        Order created = service.createOrder(new CreateOrderRequest("CUST-42", "MacBook Air", 1));
+
+        service.deleteOrder(created.getId());
+
+        assertThrows(OrderNotFoundException.class, () -> service.getOrder(created.getId()));
+    }
+
+    @Test
+    void deletingMissingOrderThrowsNotFound() {
+        OrderNotFoundException e = assertThrows(OrderNotFoundException.class,
+                () -> service.deleteOrder("ORD-999"));
+
+        assertEquals("ORD-999", e.getOrderId());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void rejectsBlankIdOnDelete(String id) {
+        assertThrows(ValidationException.class, () -> service.deleteOrder(id));
+    }
+
+    @Test
+    void deletingOneOrderKeepsTheOtherOrdersOfTheCustomer() {
+        Order first = service.createOrder(new CreateOrderRequest("CUST-42", "MacBook Air", 1));
+        Order second = service.createOrder(new CreateOrderRequest("CUST-42", "Mouse", 1));
+
+        service.deleteOrder(first.getId());
+
+        assertEquals(List.of(second), service.getOrdersByCustomer("CUST-42"));
+    }
+
+    @Test
     void sampleDataIsAvailableOnFreshRepository() {
         OrderService seeded = new OrderService(InMemoryOrderRepository.withSampleData());
 
